@@ -1,4 +1,4 @@
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { ZodTypeAny, z } from "zod";
 
 export const GET = async (req: NextRequest) => {
@@ -17,10 +17,14 @@ const determineSchemaType = (schema: any) => {
             return typeof schema; // string or anyother primitive typ
         }
     }
+    
+    // If the property `type` is present in the Object, return the type of the schema
+    return schema.type;
 }
 
 // Here the Schema can be anything, an Object or String or Boolen.... so the expected PropType is any/unknown
-const jsonSchemaToZod = (schema: any) => {
+// The fn() returns a ZodTypeAny, which can be any Zod type, Eg: z.string(), z.number(), z.boolean(), z.object(), z.array()
+const jsonSchemaToZod = (schema: any): ZodTypeAny => {
 
     const type = determineSchemaType(schema);
 
@@ -87,8 +91,49 @@ export const POST = async (req: NextRequest) => {
     // Step 2: Define the schema in the user expected format(format/schema sent the req body, Eg: { name: string }).
     // Create a Schema based on the format/schema sent in the request body, if the reponse form the AI does not match the requirement, try repeating the request once more, using the retry mechanism.
     
+    // If the parsing is successful then what the AI returned fits into the Schema perfectly
     const dynamicSchems = jsonSchemaToZod(format);
 
-    return new Response("OK", { status: 200 });
+    // Step 3: Retry mechanisms
+    // Informing TypeScript that the Promise Constructor may have a generic. Mentioning the generic is to make the Promise typesafe by mentioning the type of the value that the promise will resolve to.
+    type PromiseExecutor<T> = (
+        resolve: (value: T) => void,
+        reject: (reason?: any) => void
+    ) => void;
+
+    class RetryablePromise<T> extends Promise<T> {
+        // TypeScript will throw `Static members cannot reference class type parameters.` Error if the Generic is not declared here.
+        static async retry<T>(
+            retries: number,
+            executor: PromiseExecutor<T>
+        ): Promise<T> {
+            return new RetryablePromise(executor).catch(error => { 
+                console.error(`Retrying due to error: ${error}`);
+
+                // If the 1st promise fails, retry the promise again through recursively calling the RetryablePromise, until the retries are greater than 0
+                return retries > 0
+                    ? RetryablePromise.retry(retries - 1, executor)
+                    : RetryablePromise.reject(error);
+            });
+        }
+    }
+
+    const validationResult = RetryablePromise.retry<object>(5, (resolve, reject) => {
+        try {
+            // Call the AI to with the unstructured data
+            const res = `{result: 'AI Response'}`; // AI Response
+
+            // Validate the data against the schema
+            const resultValidation = dynamicSchems.parse(JSON.parse(res));
+
+            // Return the result if the validation/parsing is successful
+            return resolve(resultValidation);
+        } catch (error) {
+            // If the validation/parsing fails, reject the promise and rerun the promise again, until the AI givse the correct response
+            reject(error);
+        }
+    }); 
+
+    return NextResponse.json(validationResult, { status: 200 });
 
 };
